@@ -16,6 +16,8 @@ mv gcam ~/.local/bin/
 Requires the [Claude Code CLI](https://claude.com/claude-code) (`claude`)
 installed and authenticated.
 
+N.B. if you have the ohmyzsh git plugin installed you will need an `unalias gcam` line in your `.zshrc` file.
+
 ## Usage
 
 ```sh
