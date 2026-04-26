@@ -1,0 +1,4 @@
+/gcam
+*.test
+*.out
+.DS_Store
