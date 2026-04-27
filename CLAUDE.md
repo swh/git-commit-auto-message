@@ -42,16 +42,50 @@ The flow is linear and lives in `main.go::run`:
    message it falls back to the last N messages globally — better than
    no context at all.
 5. `internal/claudecli` shells out to `claude -p` with the prompt on stdin.
-6. `internal/ui.Confirm` prints the suggestion and reads `a` / `e` / `c`.
-   On edit it writes to a temp file, runs `$GIT_EDITOR`/`$EDITOR`/`vi`, and
-   reads back the result. On accept (or successful edit) `main.runCommit`
-   calls `git commit -m`.
+6. `internal/ui.Confirm` prints the suggestion in a styled box and shows a
+   `huh` select (Accept / Edit / Cancel). On edit it writes to a temp file,
+   runs `$GIT_EDITOR`/`$EDITOR`/`vi`, and reads back the result. On accept
+   (or successful edit) `commit` calls `git add` + `git commit -m`.
+
+`internal/config` resolves the commit-message style (traditional vs
+Conventional Commits 1.0.0) before any of the above runs, and `buildPrompt`
+emits a different system instruction depending on the result.
 
 The Claude Code CLI is the only model backend right now. The original
 sketch had a `Provider` interface fronting Anthropic API / Bedrock too;
 that was dropped in favour of the simpler single-path design. If multiple
 backends are needed later, reintroduce the abstraction at the
 `claudecli.Suggest` boundary.
+
+## Commit-message style configuration
+
+Two styles are supported:
+
+- `traditional` — concise imperative subject + optional body explaining WHY.
+- `conventional` — Conventional Commits 1.0.0 (`<type>(scope)!: description`,
+  body, `BREAKING CHANGE:` footers).
+
+Resolution precedence (highest first), implemented in
+`internal/config/config.go::Resolve`:
+
+1. `--style traditional|conventional` CLI flag (one-off; not persisted).
+2. `<repo-root>/.gcam.json` — checked into the repo so all collaborators
+   share the same style. Schema: `{"style": "traditional"}` or
+   `{"style": "conventional"}`. Invalid values fail loudly rather than
+   silently falling back.
+3. `$XDG_CONFIG_HOME/gcam/config.json`, falling back to
+   `~/.config/gcam/config.json`. (We do not use `os.UserConfigDir` so the
+   path is the same on macOS and Linux.)
+4. Interactive first-run prompt (`ui.ChooseStyle`) — fires only when no
+   config exists and stdin/stderr are both TTYs and `--print` was not
+   supplied. The choice is saved to the user-level config; the per-project
+   file is never written automatically.
+5. Silent default of `conventional` for non-TTY runs (CI, pipes,
+   `--print`) so the tool never crashes on huh in a non-interactive
+   environment.
+
+Source of the resolved style is logged once to stderr (e.g.
+`gcam: style=conventional (project)`) unless `--print` is set.
 
 ## Things worth knowing
 

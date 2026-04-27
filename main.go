@@ -11,9 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/pflag"
 
 	"github.com/swh/git-commit-auto-message/internal/claudecli"
+	"github.com/swh/git-commit-auto-message/internal/config"
 	"github.com/swh/git-commit-auto-message/internal/git"
 	"github.com/swh/git-commit-auto-message/internal/history"
 	"github.com/swh/git-commit-auto-message/internal/ui"
@@ -41,6 +43,7 @@ func run() error {
 		windowMin  = pflag.IntP("window", "w", 5, "minutes ± a file's mtime to pull related transcript messages")
 		fallbackN  = pflag.Int("fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
 		maxMsgChar = pflag.Int("max-message-chars", 800, "truncate each transcript message to this many chars")
+		style      = pflag.String("style", "", "commit message style: traditional|conventional (overrides config)")
 	)
 	pflag.Parse()
 
@@ -53,6 +56,17 @@ func run() error {
 	root, err := git.RepoRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("not in a git repo: %w", err)
+	}
+
+	interactive := !*printOnly &&
+		isatty.IsTerminal(os.Stdin.Fd()) &&
+		isatty.IsTerminal(os.Stderr.Fd())
+	resolved, err := config.Resolve(config.Style(*style), root, interactive, ui.ChooseStyle)
+	if err != nil {
+		return err
+	}
+	if !*printOnly {
+		fmt.Fprintf(os.Stderr, "gcam: style=%s (%s)\n", resolved.Style, resolved.Source)
 	}
 
 	allFiles, err := git.ChangedFiles(cwd)
@@ -115,7 +129,7 @@ func run() error {
 		}
 	}
 
-	prompt := buildPrompt(cwd, diff, buckets, fallback, window, *maxMsgChar)
+	prompt := buildPrompt(cwd, diff, buckets, fallback, window, *maxMsgChar, resolved.Style)
 
 	msg, err := claudecli.Suggest(ctx, prompt, *model)
 	if err != nil {
@@ -283,9 +297,10 @@ func lastN(msgs []history.Message, n int) []history.Message {
 	return msgs[len(msgs)-n:]
 }
 
-func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, window time.Duration, maxChars int) string {
+func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, window time.Duration, maxChars int, style config.Style) string {
 	var b strings.Builder
-	b.WriteString("You write concise git commit messages. Style: imperative subject under 72 chars, optional body explaining WHY (not WHAT) after a blank line. Output only the commit message — no preamble, no code fences.\n\n")
+	b.WriteString(systemInstruction(style))
+	b.WriteString("\n\n")
 
 	b.WriteString("# Diff (scoped to the user's current directory and below)\n")
 	b.WriteString("```diff\n")
@@ -316,6 +331,25 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 	}
 
 	return b.String()
+}
+
+func systemInstruction(style config.Style) string {
+	switch style {
+	case config.StyleConventional:
+		return "You write Conventional Commits 1.0.0 messages. " +
+			"Format the subject as `<type>[optional scope][!]: <description>` where type is one of " +
+			"feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert " +
+			"(`feat` correlates with MINOR, `fix` with PATCH per SemVer). " +
+			"Description is imperative, lowercase, no trailing period; the whole subject line stays under 72 chars. " +
+			"After one blank line, an optional body explains motivation (the WHY). " +
+			"Optional footers use `Token: value` form (use `-` not space in tokens, except `BREAKING CHANGE`). " +
+			"Signal breaking changes with `!` before the colon and/or a `BREAKING CHANGE: <description>` footer. " +
+			"Output only the commit message — no preamble, no code fences."
+	default:
+		return "You write concise git commit messages. " +
+			"Style: imperative subject under 72 chars, optional body explaining WHY (not WHAT) after a blank line. " +
+			"Output only the commit message — no preamble, no code fences."
+	}
 }
 
 func formatMessage(m history.Message, maxChars int) string {

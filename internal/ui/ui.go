@@ -11,6 +11,8 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/swh/git-commit-auto-message/internal/config"
 )
 
 type Action int
@@ -24,23 +26,23 @@ const (
 var msgBox = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
 	BorderForeground(lipgloss.Color("63")).
-	Padding(0, 1).
-	MarginBottom(1)
+	Padding(0, 1)
 
 // Confirm prints the suggestion and shows a select prompt. Default selection
 // is Cancel — Ctrl+C / Esc also cancels.
 func Confirm(suggested string) (string, Action, error) {
-	fmt.Fprintln(os.Stderr, msgBox.Render(suggested))
-
+	box := msgBox.Render(suggested)
 	var action Action
 	err := huh.NewSelect[Action]().
 		Title("Commit this message?").
+		Description(box).
 		Options(
+			huh.NewOption("Cancel", Cancel),
 			huh.NewOption("Accept and commit", Accept),
 			huh.NewOption("Edit in $EDITOR", Edit),
-			huh.NewOption("Cancel", Cancel),
 		).
 		Value(&action).
+		Height(selectHeight(box, 3)).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -67,6 +69,31 @@ func Confirm(suggested string) (string, Action, error) {
 	}
 }
 
+// ChooseStyle is the first-run prompt asking which commit-message style the
+// user wants. Returns an error (via huh.ErrUserAborted) if the user
+// dismisses the prompt.
+func ChooseStyle() (config.Style, error) {
+	desc := "Saved to ~/.config/gcam/config.json. Override per-repo with .gcam.json or per-run with --style."
+	var style config.Style
+	err := huh.NewSelect[config.Style]().
+		Title("Choose your commit message style").
+		Description(desc).
+		Options(
+			huh.NewOption("Conventional Commits (feat: …, fix: …, BREAKING CHANGE)", config.StyleConventional),
+			huh.NewOption("Traditional (free-form imperative subject + body)", config.StyleTraditional),
+		).
+		Value(&style).
+		Height(selectHeight(desc, 2)).
+		Run()
+	if err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return "", errors.New("style selection cancelled")
+		}
+		return "", err
+	}
+	return style, nil
+}
+
 // StageChoice is the user's answer to the "what to commit" prompt when the
 // cwd contains both pre-staged files and other (unstaged or untracked) files.
 type StageChoice int
@@ -89,11 +116,12 @@ func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
 		Title("Some files are already staged — what would you like to commit?").
 		Description(desc).
 		Options(
+			huh.NewOption("Cancel", ChoiceCancel),
 			huh.NewOption("Staged files only", ChoiceStagedOnly),
 			huh.NewOption("Stage everything and commit", ChoiceStageAll),
-			huh.NewOption("Cancel", ChoiceCancel),
 		).
 		Value(&choice).
+		Height(selectHeight(desc, 3)).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -102,6 +130,21 @@ func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
 		return ChoiceCancel, err
 	}
 	return choice, nil
+}
+
+// selectHeight computes a Height value for a huh.Select that fits its title
+// (1 line), description (lines counted from the rendered string), the
+// option list (one line each), and a few lines of slack for huh's own
+// chrome. Without an explicit Height, huh's Select viewport stays at zero
+// on the first frame and options don't appear until a key press.
+func selectHeight(description string, options int) int {
+	descLines := 1
+	if description != "" {
+		descLines = strings.Count(description, "\n") + 1
+	}
+	const titleLines = 1
+	const slack = 3
+	return titleLines + descLines + options + slack
 }
 
 func openEditor(initial string) (string, error) {
