@@ -1,7 +1,11 @@
 BINARY := gcam
 PREFIX ?= $(shell go env GOPATH)/bin
 
-.PHONY: build run test vet fmt fmt-check lint tidy clean check install help
+.PHONY: all build run test vet fmt fmt-check lint tidy clean check install help
+
+.DEFAULT_GOAL := all
+
+all: check build lint ## default: fmt-check + vet + test + build + lint
 
 help: ## list targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

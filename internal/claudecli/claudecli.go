@@ -5,6 +5,7 @@ package claudecli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -23,7 +24,18 @@ func Suggest(ctx context.Context, prompt, model string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claude %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+		if errors.Is(err, exec.ErrNotFound) {
+			return "", fmt.Errorf("`claude` CLI not found in PATH — install Claude Code (https://claude.com/claude-code)")
+		}
+		cmdline := "claude " + strings.Join(args, " ")
+		details := strings.TrimSpace(stderr.String())
+		if details == "" {
+			details = strings.TrimSpace(stdout.String())
+		}
+		if details == "" {
+			return "", fmt.Errorf("%s: %w (no output on stdout/stderr — try running `claude -p hello` to check that it's installed and authenticated)", cmdline, err)
+		}
+		return "", fmt.Errorf("%s: %w\n%s", cmdline, err, details)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

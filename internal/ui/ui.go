@@ -3,11 +3,14 @@
 package ui
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type Action int
@@ -18,26 +21,38 @@ const (
 	Edit
 )
 
-// Confirm prints the suggestion, prompts for a/e/c, and returns the final
-// message plus the chosen action. Default (empty input) is Cancel — pressing
-// enter at the prompt should never silently commit.
-func Confirm(suggested string) (string, Action, error) {
-	fmt.Fprintln(os.Stderr, "─── suggested commit message ───")
-	fmt.Fprintln(os.Stderr, suggested)
-	fmt.Fprintln(os.Stderr, "────────────────────────────────")
-	fmt.Fprint(os.Stderr, "[a]ccept / [e]dit / [C]ancel? ")
+var msgBox = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("63")).
+	Padding(0, 1).
+	MarginBottom(1)
 
-	r := bufio.NewReader(os.Stdin)
-	line, err := r.ReadString('\n')
-	if err != nil && line == "" {
+// Confirm prints the suggestion and shows a select prompt. Default selection
+// is Cancel — Ctrl+C / Esc also cancels.
+func Confirm(suggested string) (string, Action, error) {
+	fmt.Fprintln(os.Stderr, msgBox.Render(suggested))
+
+	var action Action
+	err := huh.NewSelect[Action]().
+		Title("Commit this message?").
+		Options(
+			huh.NewOption("Accept and commit", Accept),
+			huh.NewOption("Edit in $EDITOR", Edit),
+			huh.NewOption("Cancel", Cancel),
+		).
+		Value(&action).
+		Run()
+	if err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return "", Cancel, nil
+		}
 		return "", Cancel, err
 	}
-	choice := strings.ToLower(strings.TrimSpace(line))
 
-	switch choice {
-	case "a", "y", "yes", "accept":
+	switch action {
+	case Accept:
 		return suggested, Accept, nil
-	case "e", "edit":
+	case Edit:
 		edited, err := openEditor(suggested)
 		if err != nil {
 			return "", Cancel, err
@@ -63,32 +78,30 @@ const (
 )
 
 // ChooseStageMode is shown when the cwd has both pre-staged and other
-// changes. The two summaries are printed verbatim (callers format them).
-// Default (empty input) is Cancel.
+// changes. The two summaries are shown verbatim (callers format them).
+// Default selection is Cancel.
 func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
-	fmt.Fprintln(os.Stderr, "Some files are already staged.")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Already staged:")
-	fmt.Fprint(os.Stderr, stagedSummary)
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Other changes:")
-	fmt.Fprint(os.Stderr, otherSummary)
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprint(os.Stderr, "[s]taged only / [a]dd others too / [C]ancel? ")
+	desc := "Already staged:\n" + strings.TrimRight(stagedSummary, "\n") +
+		"\n\nOther changes:\n" + strings.TrimRight(otherSummary, "\n")
 
-	r := bufio.NewReader(os.Stdin)
-	line, err := r.ReadString('\n')
-	if err != nil && line == "" {
+	var choice StageChoice
+	err := huh.NewSelect[StageChoice]().
+		Title("Some files are already staged — what would you like to commit?").
+		Description(desc).
+		Options(
+			huh.NewOption("Staged files only", ChoiceStagedOnly),
+			huh.NewOption("Stage everything and commit", ChoiceStageAll),
+			huh.NewOption("Cancel", ChoiceCancel),
+		).
+		Value(&choice).
+		Run()
+	if err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return ChoiceCancel, nil
+		}
 		return ChoiceCancel, err
 	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "s", "staged":
-		return ChoiceStagedOnly, nil
-	case "a", "add", "all":
-		return ChoiceStageAll, nil
-	default:
-		return ChoiceCancel, nil
-	}
+	return choice, nil
 }
 
 func openEditor(initial string) (string, error) {
@@ -97,10 +110,10 @@ func openEditor(initial string) (string, error) {
 		return "", err
 	}
 	path := f.Name()
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 
 	if _, err := f.WriteString(initial); err != nil {
-		f.Close()
+		_ = f.Close()
 		return "", err
 	}
 	if err := f.Close(); err != nil {

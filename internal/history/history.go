@@ -81,7 +81,7 @@ func readSession(path string) ([]Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	type entry struct {
 		Type      string          `json:"type"`
