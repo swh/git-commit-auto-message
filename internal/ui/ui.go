@@ -42,7 +42,6 @@ func Confirm(suggested string) (string, Action, error) {
 			huh.NewOption("Edit in $EDITOR", Edit),
 		).
 		Value(&action).
-		Height(selectHeight(box, 3)).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -83,7 +82,6 @@ func ChooseStyle() (config.Style, error) {
 			huh.NewOption("Traditional (free-form imperative subject + body)", config.StyleTraditional),
 		).
 		Value(&style).
-		Height(selectHeight(desc, 2)).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -121,7 +119,6 @@ func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
 			huh.NewOption("Stage everything and commit", ChoiceStageAll),
 		).
 		Value(&choice).
-		Height(selectHeight(desc, 3)).
 		Run()
 	if err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -130,21 +127,6 @@ func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
 		return ChoiceCancel, err
 	}
 	return choice, nil
-}
-
-// selectHeight computes a Height value for a huh.Select that fits its title
-// (1 line), description (lines counted from the rendered string), the
-// option list (one line each), and a few lines of slack for huh's own
-// chrome. Without an explicit Height, huh's Select viewport stays at zero
-// on the first frame and options don't appear until a key press.
-func selectHeight(description string, options int) int {
-	descLines := 1
-	if description != "" {
-		descLines = strings.Count(description, "\n") + 1
-	}
-	const titleLines = 1
-	const slack = 3
-	return titleLines + descLines + options + slack
 }
 
 func openEditor(initial string) (string, error) {
