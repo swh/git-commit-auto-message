@@ -27,6 +27,7 @@ gcam --print      # just print the suggestion to stdout
 gcam --no-history # ignore Claude Code transcript context
 gcam --model claude-sonnet-4-6
 gcam --style conventional   # one-off override (traditional|conventional)
+gcam -H "fixes #123" -H "part of the auth rewrite"  # add context the diff doesn't show
 ```
 
 The diff is scoped to the current directory and below (so running it in a

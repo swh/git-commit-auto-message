@@ -44,6 +44,7 @@ func run() error {
 		maxMsgChar    = pflag.Int("max-message-chars", 800, "truncate each transcript message to this many chars")
 		maxBucketChar = pflag.Int("max-bucket-chars", 8000, "max chars of transcript per file; oldest messages dropped to fit")
 		style         = pflag.String("style", "", "commit message style: traditional|conventional (overrides config)")
+		hints         = pflag.StringArrayP("hint", "H", nil, "extra context for the model (repeatable, e.g. -H 'fixes #123' -H 'preparing for v2 release')")
 	)
 	pflag.Parse()
 
@@ -128,7 +129,7 @@ func run() error {
 		}
 	}
 
-	prompt := buildPrompt(cwd, diff, buckets, fallback, *maxMsgChar, resolved.Style)
+	prompt := buildPrompt(cwd, diff, buckets, fallback, *maxMsgChar, resolved.Style, *hints)
 
 	msg, err := claudecli.Suggest(ctx, prompt, *model)
 	if err != nil {
@@ -345,10 +346,18 @@ func lastN(msgs []history.Message, n int) []history.Message {
 	return msgs[len(msgs)-n:]
 }
 
-func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, maxChars int, style config.Style) string {
+func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, maxChars int, style config.Style, hints []string) string {
 	var b strings.Builder
 	b.WriteString(systemInstruction(style))
 	b.WriteString("\n\n")
+
+	if h := cleanHints(hints); len(h) > 0 {
+		b.WriteString("# Hints from the user (treat as authoritative context for *why* this change was made)\n")
+		for _, line := range h {
+			fmt.Fprintf(&b, "- %s\n", line)
+		}
+		b.WriteString("\n")
+	}
 
 	b.WriteString("# Diff (scoped to the user's current directory and below)\n")
 	b.WriteString("```diff\n")
@@ -383,6 +392,16 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 	}
 
 	return b.String()
+}
+
+func cleanHints(hints []string) []string {
+	out := make([]string, 0, len(hints))
+	for _, h := range hints {
+		if s := strings.TrimSpace(h); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func systemInstruction(style config.Style) string {
