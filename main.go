@@ -135,7 +135,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	msg = strings.TrimSpace(msg)
+	msg = stripCodeFences(strings.TrimSpace(msg))
 	if msg == "" {
 		return errors.New("claude returned an empty message")
 	}
@@ -347,13 +347,18 @@ func lastN(msgs []history.Message, n int) []history.Message {
 }
 
 func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, maxChars int, style config.Style, hints []string) string {
+	cleaned := cleanHints(hints)
+
 	var b strings.Builder
 	b.WriteString(systemInstruction(style))
+	if len(cleaned) > 0 {
+		b.WriteString(" When the user supplies hints (see below), you MUST reflect each hint in the commit message — usually in the body, or in the subject if the hint is the main reason for the change. Treat hints as overriding any conflicting signal from the diff or transcript.")
+	}
 	b.WriteString("\n\n")
 
-	if h := cleanHints(hints); len(h) > 0 {
-		b.WriteString("# Hints from the user (treat as authoritative context for *why* this change was made)\n")
-		for _, line := range h {
+	if len(cleaned) > 0 {
+		b.WriteString("# REQUIRED HINTS FROM THE USER — reflect every one of these in the commit message you produce\n")
+		for _, line := range cleaned {
 			fmt.Fprintf(&b, "- %s\n", line)
 		}
 		b.WriteString("\n")
@@ -391,7 +396,35 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 		}
 	}
 
+	if len(cleaned) > 0 {
+		b.WriteString("\n# Final reminder\n")
+		b.WriteString("Before producing the commit message, double-check that EVERY hint above is reflected in your output. Hints carry context the diff alone cannot show; omitting them is a failure of the task.\n")
+		for _, line := range cleaned {
+			fmt.Fprintf(&b, "- %s\n", line)
+		}
+	}
+
 	return b.String()
+}
+
+// stripCodeFences removes a wrapping markdown code fence around s, if
+// present. The model is instructed not to use code fences but occasionally
+// does anyway; commit messages aren't markdown, so we strip them rather
+// than committing literal backticks.
+func stripCodeFences(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) < 2 {
+		return s
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return s
+	}
+	// First line is "```" or "```lang"; drop it and the trailing fence.
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 }
 
 func cleanHints(hints []string) []string {

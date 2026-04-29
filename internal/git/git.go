@@ -109,8 +109,12 @@ func ChangedFiles(dir string) ([]ChangedFile, error) {
 
 // LastCommitTime returns the commit time of the most recent commit that
 // touched path (relative or absolute). The bool is false if path has never
-// been committed in this repo.
+// been committed in this repo, including the case where the repo has no
+// commits at all.
 func LastCommitTime(repoRoot, path string) (time.Time, bool, error) {
+	if !hasHead(repoRoot) {
+		return time.Time{}, false, nil
+	}
 	out, err := run(repoRoot, "log", "-1", "--format=%cI", "--", path)
 	if err != nil {
 		return time.Time{}, false, err
