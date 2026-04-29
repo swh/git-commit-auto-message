@@ -37,13 +37,13 @@ const (
 
 func run() error {
 	var (
-		model      = pflag.StringP("model", "m", "", "override model id passed to `claude --model`")
-		printOnly  = pflag.BoolP("print", "p", false, "print the message and exit; do not prompt or commit")
-		noHistory  = pflag.BoolP("no-history", "n", false, "skip Claude Code conversation history")
-		windowMin  = pflag.IntP("window", "w", 5, "minutes ± a file's mtime to pull related transcript messages")
-		fallbackN  = pflag.Int("fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
-		maxMsgChar = pflag.Int("max-message-chars", 800, "truncate each transcript message to this many chars")
-		style      = pflag.String("style", "", "commit message style: traditional|conventional (overrides config)")
+		model         = pflag.StringP("model", "m", "", "override model id passed to `claude --model`")
+		printOnly     = pflag.BoolP("print", "p", false, "print the message and exit; do not prompt or commit")
+		noHistory     = pflag.BoolP("no-history", "n", false, "skip Claude Code conversation history")
+		fallbackN     = pflag.Int("fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
+		maxMsgChar    = pflag.Int("max-message-chars", 800, "truncate each transcript message to this many chars")
+		maxBucketChar = pflag.Int("max-bucket-chars", 8000, "max chars of transcript per file; oldest messages dropped to fit")
+		style         = pflag.String("style", "", "commit message style: traditional|conventional (overrides config)")
 	)
 	pflag.Parse()
 
@@ -113,23 +113,22 @@ func run() error {
 		return errors.New("selected set has no diff content")
 	}
 
-	window := time.Duration(*windowMin) * time.Minute
 	var buckets []fileBucket
 	var fallback []history.Message
 	if !*noHistory {
-		earliest := earliestMtime(files)
-		var since time.Time
-		if !earliest.IsZero() {
-			since = earliest.Add(-window - 30*time.Minute)
-		}
+		lowers := lowerBounds(root, files)
+		since := earliestNonZero(lowers)
 		msgs, _ := history.Recent(root, since)
-		buckets = correlate(files, msgs, window)
+		buckets = correlate(files, lowers, msgs)
+		for i := range buckets {
+			buckets[i].Messages = compactBucket(buckets[i].Messages, *maxMsgChar, *maxBucketChar)
+		}
 		if !anyBucketHasMessages(buckets) {
 			fallback = lastN(msgs, *fallbackN)
 		}
 	}
 
-	prompt := buildPrompt(cwd, diff, buckets, fallback, window, *maxMsgChar, resolved.Style)
+	prompt := buildPrompt(cwd, diff, buckets, fallback, *maxMsgChar, resolved.Style)
 
 	msg, err := claudecli.Suggest(ctx, prompt, *model)
 	if err != nil {
@@ -238,34 +237,96 @@ func commit(cwd string, files []git.ChangedFile, m mode, msg string) error {
 	return c.Run()
 }
 
-// fileBucket pairs a changed file with the transcript messages timestamped
-// near its mtime — the model's best guess at what drove the change.
+// fileBucket pairs a changed file with the transcript messages from the work
+// session that produced its current state — bounded below by the file's last
+// commit (or repo HEAD for never-committed files) and above by the file's
+// mtime. Lower may be zero, meaning "no lower bound".
 type fileBucket struct {
 	File     git.ChangedFile
+	Lower    time.Time
 	Messages []history.Message
 }
 
-func correlate(files []git.ChangedFile, msgs []history.Message, window time.Duration) []fileBucket {
+// lowerBounds resolves each file's "previous commit" timestamp. Untracked /
+// never-committed files fall back to repo HEAD's commit time (zero if the
+// repo has no commits yet).
+func lowerBounds(repoRoot string, files []git.ChangedFile) []time.Time {
+	out := make([]time.Time, len(files))
+	headTime, _, _ := git.HeadTime(repoRoot)
+	for i, f := range files {
+		if t, ok, _ := git.LastCommitTime(repoRoot, f.Path); ok {
+			out[i] = t
+			continue
+		}
+		out[i] = headTime
+	}
+	return out
+}
+
+func correlate(files []git.ChangedFile, lowers []time.Time, msgs []history.Message) []fileBucket {
 	buckets := make([]fileBucket, 0, len(files))
-	for _, f := range files {
+	for i, f := range files {
 		if f.Mtime.IsZero() {
 			buckets = append(buckets, fileBucket{File: f})
 			continue
 		}
 		var related []history.Message
 		for _, m := range msgs {
-			d := m.Time.Sub(f.Mtime)
-			if d < 0 {
-				d = -d
+			if m.Time.After(f.Mtime) {
+				continue
 			}
-			if d <= window {
-				related = append(related, m)
+			if !lowers[i].IsZero() && m.Time.Before(lowers[i]) {
+				continue
 			}
+			related = append(related, m)
 		}
 		sort.Slice(related, func(i, j int) bool { return related[i].Time.Before(related[j].Time) })
-		buckets = append(buckets, fileBucket{File: f, Messages: related})
+		buckets = append(buckets, fileBucket{File: f, Lower: lowers[i], Messages: related})
 	}
 	return buckets
+}
+
+func earliestNonZero(ts []time.Time) time.Time {
+	var out time.Time
+	for _, t := range ts {
+		if t.IsZero() {
+			continue
+		}
+		if out.IsZero() || t.Before(out) {
+			out = t
+		}
+	}
+	return out
+}
+
+// compactBucket trims a bucket's messages so that the total formatted text
+// stays under maxBucketChars. Each message is first truncated by
+// maxMsgChars; then oldest messages are dropped until the total fits.
+// Newest messages (closest to the file's mtime) are preserved.
+func compactBucket(msgs []history.Message, maxMsgChars, maxBucketChars int) []history.Message {
+	if maxBucketChars <= 0 || len(msgs) == 0 {
+		return msgs
+	}
+	total := 0
+	for _, m := range msgs {
+		total += formattedLen(m, maxMsgChars)
+	}
+	if total <= maxBucketChars {
+		return msgs
+	}
+	for total > maxBucketChars && len(msgs) > 0 {
+		total -= formattedLen(msgs[0], maxMsgChars)
+		msgs = msgs[1:]
+	}
+	return msgs
+}
+
+func formattedLen(m history.Message, maxMsgChars int) int {
+	text := strings.TrimSpace(m.Text)
+	if maxMsgChars > 0 && len(text) > maxMsgChars {
+		return maxMsgChars + 1 + len("[15:04:05] role: …\n")
+	}
+	return len(text) + len("[15:04:05] role: \n")
 }
 
 func anyBucketHasMessages(buckets []fileBucket) bool {
@@ -277,19 +338,6 @@ func anyBucketHasMessages(buckets []fileBucket) bool {
 	return false
 }
 
-func earliestMtime(files []git.ChangedFile) time.Time {
-	var t time.Time
-	for _, f := range files {
-		if f.Mtime.IsZero() {
-			continue
-		}
-		if t.IsZero() || f.Mtime.Before(t) {
-			t = f.Mtime
-		}
-	}
-	return t
-}
-
 func lastN(msgs []history.Message, n int) []history.Message {
 	if len(msgs) <= n {
 		return msgs
@@ -297,7 +345,7 @@ func lastN(msgs []history.Message, n int) []history.Message {
 	return msgs[len(msgs)-n:]
 }
 
-func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, window time.Duration, maxChars int, style config.Style) string {
+func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Message, maxChars int, style config.Style) string {
 	var b strings.Builder
 	b.WriteString(systemInstruction(style))
 	b.WriteString("\n\n")
@@ -308,8 +356,8 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 	b.WriteString("\n```\n")
 
 	if len(buckets) > 0 && anyBucketHasMessages(buckets) {
-		fmt.Fprintf(&b, "\n# Likely intent — transcript messages within ±%s of each file's mtime\n", window)
-		b.WriteString("Use these to infer *why* the change was made, not *what*.\n")
+		b.WriteString("\n# Likely intent — transcript messages from the work session that produced each file's current state\n")
+		b.WriteString("Window per file: from the file's previous commit (or repo HEAD for never-committed files) up to its current mtime. Use these to infer *why* the change was made, not *what*.\n")
 		for _, bk := range buckets {
 			if len(bk.Messages) == 0 {
 				continue
@@ -318,7 +366,11 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 			if err != nil {
 				rel = bk.File.Path
 			}
-			fmt.Fprintf(&b, "\n## %s (modified %s)\n", rel, bk.File.Mtime.Local().Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(&b, "\n## %s (modified %s", rel, bk.File.Mtime.Local().Format("2006-01-02 15:04:05"))
+			if !bk.Lower.IsZero() {
+				fmt.Fprintf(&b, ", since %s", bk.Lower.Local().Format("2006-01-02 15:04:05"))
+			}
+			b.WriteString(")\n")
 			for _, m := range bk.Messages {
 				b.WriteString(formatMessage(m, maxChars))
 			}

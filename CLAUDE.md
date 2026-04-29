@@ -35,8 +35,12 @@ The flow is linear and lives in `main.go::run`:
    to those at-or-after a `since` cutoff. The encoded root is the absolute
    project path with `/` replaced by `-` (Claude Code's own convention).
 3. `main.correlate` buckets transcript messages by changed file: each file
-   gets the messages whose timestamp is within ±window of its mtime. The
-   default window is 5 minutes (`--window`).
+   gets the messages timestamped in `(lastCommitTime(file), file.mtime]` —
+   i.e. the work-session window from the file's previous commit up to its
+   current mtime. Untracked / never-committed files fall back to repo
+   HEAD's commit time as the lower bound (zero if there's no HEAD yet).
+   `main.compactBucket` then drops oldest messages from each bucket until
+   it fits in `--max-bucket-chars` (default 8000).
 4. `main.buildPrompt` emits the diff plus a per-file "Likely intent"
    section showing the correlated messages. If no file matched any
    message it falls back to the last N messages globally — better than

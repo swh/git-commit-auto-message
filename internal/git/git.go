@@ -84,7 +84,10 @@ func ChangedFiles(dir string) ([]ChangedFile, error) {
 	}
 
 	// Untracked, expanded to individual files (respects .gitignore).
-	untracked, err := run(dir, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard", "--", ".")
+	// `--full-name` makes paths root-relative; without it, ls-files returns
+	// paths relative to cwd, which would mis-locate files when cwd is a
+	// subdirectory of the repo root.
+	untracked, err := run(dir, "-c", "core.quotepath=false", "ls-files", "--full-name", "--others", "--exclude-standard", "--", ".")
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +105,43 @@ func ChangedFiles(dir string) ([]ChangedFile, error) {
 	}
 
 	return files, nil
+}
+
+// LastCommitTime returns the commit time of the most recent commit that
+// touched path (relative or absolute). The bool is false if path has never
+// been committed in this repo.
+func LastCommitTime(repoRoot, path string) (time.Time, bool, error) {
+	out, err := run(repoRoot, "log", "-1", "--format=%cI", "--", path)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return time.Time{}, false, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse commit time %q: %w", s, err)
+	}
+	return t, true, nil
+}
+
+// HeadTime returns the commit time of HEAD, or (zero, false) if the repo
+// has no commits yet.
+func HeadTime(repoRoot string) (time.Time, bool, error) {
+	if !hasHead(repoRoot) {
+		return time.Time{}, false, nil
+	}
+	out, err := run(repoRoot, "log", "-1", "--format=%cI", "HEAD")
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	s := strings.TrimSpace(out)
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse HEAD time %q: %w", s, err)
+	}
+	return t, true, nil
 }
 
 // DiffScoped returns the combined diff (staged + unstaged vs HEAD) for `dir` and below,
