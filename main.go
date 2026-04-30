@@ -35,60 +35,53 @@ const (
 	modeStagedOnly             // commit only the pre-staged set
 )
 
-func run() error {
-	var (
-		model         = pflag.StringP("model", "m", "", "override model id passed to `claude --model`")
-		printOnly     = pflag.BoolP("print", "p", false, "print the message and exit; do not prompt or commit")
-		noHistory     = pflag.BoolP("no-history", "n", false, "skip Claude Code conversation history")
-		fallbackN     = pflag.Int("fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
-		maxMsgChar    = pflag.Int("max-message-chars", 800, "truncate each transcript message to this many chars")
-		maxBucketChar = pflag.Int("max-bucket-chars", 8000, "max chars of transcript per file; oldest messages dropped to fit")
-		style         = pflag.String("style", "", "commit message style: traditional|conventional (overrides config)")
-		hints         = pflag.StringArrayP("hint", "H", nil, "extra context for the model (repeatable, e.g. -H 'fixes #123' -H 'preparing for v2 release')")
-	)
+// cliFlags is the parsed command-line flag set. Held in one struct so we
+// don't thread eight pointers through every helper.
+type cliFlags struct {
+	model         string
+	printOnly     bool
+	noHistory     bool
+	fallbackN     int
+	maxMsgChar    int
+	maxBucketChar int
+	style         string
+	hints         []string
+}
+
+func parseFlags() cliFlags {
+	var f cliFlags
+	pflag.StringVarP(&f.model, "model", "m", "", "override model id passed to `claude --model`")
+	pflag.BoolVarP(&f.printOnly, "print", "p", false, "print the message and exit; do not prompt or commit")
+	pflag.BoolVarP(&f.noHistory, "no-history", "n", false, "skip Claude Code conversation history")
+	pflag.IntVar(&f.fallbackN, "fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
+	pflag.IntVar(&f.maxMsgChar, "max-message-chars", 800, "truncate each transcript message to this many chars")
+	pflag.IntVar(&f.maxBucketChar, "max-bucket-chars", 8000, "max chars of transcript per file; oldest messages dropped to fit")
+	pflag.StringVar(&f.style, "style", "", "commit message style: traditional|conventional (overrides config)")
+	pflag.StringArrayVarP(&f.hints, "hint", "H", nil, "extra context for the model (repeatable, e.g. -H 'fixes #123' -H 'preparing for v2 release')")
 	pflag.Parse()
+	return f
+}
 
-	ctx := context.Background()
+func run() error {
+	flags := parseFlags()
 
-	cwd, err := os.Getwd()
+	cwd, root, err := repoContext()
 	if err != nil {
 		return err
 	}
-	root, err := git.RepoRoot(cwd)
-	if err != nil {
-		return fmt.Errorf("not in a git repo: %w", err)
-	}
 
-	interactive := !*printOnly &&
+	interactive := !flags.printOnly &&
 		isatty.IsTerminal(os.Stdin.Fd()) &&
 		isatty.IsTerminal(os.Stderr.Fd())
-	resolved, err := config.Resolve(config.Style(*style), root, interactive, ui.ChooseStyle)
+	resolved, err := config.Resolve(config.Style(flags.style), root, interactive, ui.ChooseStyle)
 	if err != nil {
 		return err
 	}
-	if !*printOnly {
+	if !flags.printOnly {
 		fmt.Fprintf(os.Stderr, "gcam: style=%s (%s)\n", resolved.Style, resolved.Source)
 	}
 
-	allFiles, err := git.ChangedFiles(cwd)
-	if err != nil {
-		return fmt.Errorf("git status: %w", err)
-	}
-	if len(allFiles) == 0 {
-		return errors.New("no changes detected in current directory or below")
-	}
-
-	var staged, other []git.ChangedFile
-	for _, f := range allFiles {
-		if f.IsStaged() {
-			staged = append(staged, f)
-		}
-		if f.HasUnstaged() {
-			other = append(other, f)
-		}
-	}
-
-	files, m, err := chooseMode(cwd, allFiles, staged, other, *printOnly)
+	files, m, err := selectFiles(cwd, flags.printOnly)
 	if err != nil {
 		return err
 	}
@@ -96,56 +89,127 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "cancelled")
 		return nil
 	}
-
-	if !*printOnly {
+	if !flags.printOnly {
 		announceMode(cwd, files, m)
 	}
 
-	var diff string
+	diff, err := buildDiff(cwd, m)
+	if err != nil {
+		return err
+	}
+
+	buckets, fallback := gatherTranscript(root, files, flags)
+	prompt := buildPrompt(cwd, diff, buckets, fallback, flags.maxMsgChar, resolved.Style, flags.hints)
+
+	msg, err := suggestMessage(context.Background(), prompt, flags.model)
+	if err != nil {
+		return err
+	}
+
+	if flags.printOnly {
+		fmt.Println(msg)
+		return nil
+	}
+	return interactiveLoop(cwd, files, m, msg)
+}
+
+// repoContext resolves the cwd and the enclosing git repo root.
+func repoContext() (cwd, root string, err error) {
+	cwd, err = os.Getwd()
+	if err != nil {
+		return "", "", err
+	}
+	root, err = git.RepoRoot(cwd)
+	if err != nil {
+		return "", "", fmt.Errorf("not in a git repo: %w", err)
+	}
+	return cwd, root, nil
+}
+
+// selectFiles lists changed files under cwd, splits them into staged vs
+// other, and asks the user (or auto-decides) which set to commit. Returns
+// (nil, _, nil) when the user cancels at the stage-mode prompt.
+func selectFiles(cwd string, printOnly bool) ([]git.ChangedFile, mode, error) {
+	all, err := git.ChangedFiles(cwd)
+	if err != nil {
+		return nil, 0, fmt.Errorf("git status: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, 0, errors.New("no changes detected in current directory or below")
+	}
+
+	var staged, other []git.ChangedFile
+	for _, f := range all {
+		if f.IsStaged() {
+			staged = append(staged, f)
+		}
+		if f.HasUnstaged() {
+			other = append(other, f)
+		}
+	}
+	return chooseMode(cwd, all, staged, other, printOnly)
+}
+
+// buildDiff returns the diff that will be sent to the model — either the
+// staged-only diff or the full cwd-scoped diff (tracked + untracked
+// synthetic). Errors out if the chosen set has no diff content.
+func buildDiff(cwd string, m mode) (string, error) {
+	var (
+		diff string
+		err  error
+	)
 	if m == modeStagedOnly {
 		diff, err = git.DiffStaged(cwd)
 	} else {
 		diff, err = git.DiffScoped(cwd)
 	}
 	if err != nil {
-		return fmt.Errorf("git diff: %w", err)
+		return "", fmt.Errorf("git diff: %w", err)
 	}
 	if strings.TrimSpace(diff) == "" {
-		return errors.New("selected set has no diff content")
+		return "", errors.New("selected set has no diff content")
 	}
+	return diff, nil
+}
 
-	var buckets []fileBucket
-	var fallback []history.Message
-	if !*noHistory {
-		lowers := lowerBounds(root, files)
-		since := earliestNonZero(lowers)
-		msgs, _ := history.Recent(root, since)
-		buckets = correlate(files, lowers, msgs)
-		for i := range buckets {
-			buckets[i].Messages = compactBucket(buckets[i].Messages, *maxMsgChar, *maxBucketChar)
-		}
-		if !anyBucketHasMessages(buckets) {
-			fallback = lastN(msgs, *fallbackN)
-		}
+// gatherTranscript loads Claude Code transcript messages and correlates them
+// with the changed files. Returns (nil, nil) when --no-history is set or no
+// transcript exists. Falls back to the last N messages globally when no
+// per-file window matched anything.
+func gatherTranscript(root string, files []git.ChangedFile, flags cliFlags) ([]fileBucket, []history.Message) {
+	if flags.noHistory {
+		return nil, nil
 	}
+	lowers := lowerBounds(root, files)
+	since := earliestNonZero(lowers)
+	msgs, _ := history.Recent(root, since)
+	buckets := correlate(files, lowers, msgs)
+	for i := range buckets {
+		buckets[i].Messages = compactBucket(buckets[i].Messages, flags.maxMsgChar, flags.maxBucketChar)
+	}
+	if !anyBucketHasMessages(buckets) {
+		return buckets, lastN(msgs, flags.fallbackN)
+	}
+	return buckets, nil
+}
 
-	prompt := buildPrompt(cwd, diff, buckets, fallback, *maxMsgChar, resolved.Style, *hints)
-
-	msg, err := claudecli.Suggest(ctx, prompt, *model)
+// suggestMessage shells out to `claude -p`, strips any code fences the model
+// added despite being told not to, and rejects empty output.
+func suggestMessage(ctx context.Context, prompt, model string) (string, error) {
+	raw, err := claudecli.Suggest(ctx, prompt, model)
 	if err != nil {
-		return err
+		return "", err
 	}
-	raw := msg
-	msg = stripCodeFences(strings.TrimSpace(msg))
+	msg := stripCodeFences(strings.TrimSpace(raw))
 	if msg == "" {
-		return fmt.Errorf("claude returned an empty message (raw output: %q)", raw)
+		return "", fmt.Errorf("claude returned an empty message (raw output: %q)", raw)
 	}
+	return msg, nil
+}
 
-	if *printOnly {
-		fmt.Println(msg)
-		return nil
-	}
-
+// interactiveLoop shows the suggestion to the user and loops on edit until
+// they accept or cancel. On accept, the commit is performed.
+func interactiveLoop(cwd string, files []git.ChangedFile, m mode, msg string) error {
 	for {
 		final, action, err := ui.Confirm(msg)
 		if err != nil {
@@ -174,7 +238,7 @@ func chooseMode(cwd string, all, staged, other []git.ChangedFile, printOnly bool
 		if printOnly {
 			return all, modeAll, nil
 		}
-		choice, err := ui.ChooseStageMode(renderShort(cwd, staged), renderShort(cwd, other))
+		choice, err := ui.ChooseStageMode(cwd, staged, other)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -200,20 +264,8 @@ func announceMode(cwd string, files []git.ChangedFile, m mode) {
 	case modeAll:
 		fmt.Fprintf(os.Stderr, "Will stage and commit %d file(s):\n", len(files))
 	}
-	fmt.Fprint(os.Stderr, renderShort(cwd, files))
+	fmt.Fprint(os.Stderr, ui.RenderFileList(cwd, files))
 	fmt.Fprintln(os.Stderr)
-}
-
-func renderShort(cwd string, files []git.ChangedFile) string {
-	var b strings.Builder
-	for _, f := range files {
-		rel, err := filepath.Rel(cwd, f.Path)
-		if err != nil {
-			rel = f.Path
-		}
-		fmt.Fprintf(&b, "  %s %s\n", f.Status, rel)
-	}
-	return b.String()
 }
 
 func commit(cwd string, files []git.ChangedFile, m mode, msg string) error {
@@ -309,26 +361,17 @@ func compactBucket(msgs []history.Message, maxMsgChars, maxBucketChars int) []hi
 	if maxBucketChars <= 0 || len(msgs) == 0 {
 		return msgs
 	}
+	sizes := make([]int, len(msgs))
 	total := 0
-	for _, m := range msgs {
-		total += formattedLen(m, maxMsgChars)
-	}
-	if total <= maxBucketChars {
-		return msgs
+	for i, m := range msgs {
+		sizes[i] = len(formatMessage(m, maxMsgChars))
+		total += sizes[i]
 	}
 	for total > maxBucketChars && len(msgs) > 0 {
-		total -= formattedLen(msgs[0], maxMsgChars)
-		msgs = msgs[1:]
+		total -= sizes[0]
+		msgs, sizes = msgs[1:], sizes[1:]
 	}
 	return msgs
-}
-
-func formattedLen(m history.Message, maxMsgChars int) int {
-	text := strings.TrimSpace(m.Text)
-	if maxMsgChars > 0 && len(text) > maxMsgChars {
-		return maxMsgChars + 1 + len("[15:04:05] role: …\n")
-	}
-	return len(text) + len("[15:04:05] role: \n")
 }
 
 func anyBucketHasMessages(buckets []fileBucket) bool {

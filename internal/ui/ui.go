@@ -7,13 +7,30 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/swh/git-commit-auto-message/internal/config"
+	"github.com/swh/git-commit-auto-message/internal/git"
 )
+
+// RenderFileList formats a set of changed files as a short, indented status
+// listing — one line per file, paths shown relative to cwd. Used both by the
+// "Will commit X file(s)" announcement and by the stage-mode prompt.
+func RenderFileList(cwd string, files []git.ChangedFile) string {
+	var b strings.Builder
+	for _, f := range files {
+		rel, err := filepath.Rel(cwd, f.Path)
+		if err != nil {
+			rel = f.Path
+		}
+		fmt.Fprintf(&b, "  %s %s\n", f.Status, rel)
+	}
+	return b.String()
+}
 
 type Action int
 
@@ -102,12 +119,12 @@ const (
 	ChoiceStageAll
 )
 
-// ChooseStageMode is shown when the cwd has both pre-staged and other
-// changes. The two summaries are shown verbatim (callers format them).
+// ChooseStageMode is shown when cwd has both pre-staged and other changes.
+// staged and other are rendered as indented file listings (relative to cwd).
 // Default selection is Cancel.
-func ChooseStageMode(stagedSummary, otherSummary string) (StageChoice, error) {
-	desc := "Already staged:\n" + strings.TrimRight(stagedSummary, "\n") +
-		"\n\nOther changes:\n" + strings.TrimRight(otherSummary, "\n")
+func ChooseStageMode(cwd string, staged, other []git.ChangedFile) (StageChoice, error) {
+	desc := "Already staged:\n" + strings.TrimRight(RenderFileList(cwd, staged), "\n") +
+		"\n\nOther changes:\n" + strings.TrimRight(RenderFileList(cwd, other), "\n")
 
 	var choice StageChoice
 	err := huh.NewSelect[StageChoice]().

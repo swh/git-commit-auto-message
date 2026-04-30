@@ -186,11 +186,11 @@ func DiffStaged(dir string) (string, error) {
 	if hasHead(dir) {
 		return run(dir, "diff", "--cached", "--", ".")
 	}
-	emptyTree, err := run(dir, "hash-object", "-t", "tree", "/dev/null")
+	empty, err := emptyTreeHash(dir)
 	if err != nil {
 		return "", err
 	}
-	return run(dir, "diff", "--cached", strings.TrimSpace(emptyTree), "--", ".")
+	return run(dir, "diff", "--cached", empty, "--", ".")
 }
 
 // trackedDiff returns the diff of tracked files (staged + unstaged) for dir
@@ -200,11 +200,21 @@ func trackedDiff(dir string) (string, error) {
 	if hasHead(dir) {
 		return run(dir, "diff", "HEAD", "--", ".")
 	}
-	emptyTree, err := run(dir, "hash-object", "-t", "tree", "/dev/null")
+	empty, err := emptyTreeHash(dir)
 	if err != nil {
 		return "", err
 	}
-	return run(dir, "diff", "--cached", strings.TrimSpace(emptyTree), "--", ".")
+	return run(dir, "diff", "--cached", empty, "--", ".")
+}
+
+// emptyTreeHash returns the SHA of git's canonical empty tree, used as a
+// base for `git diff` when the repo has no commits yet.
+func emptyTreeHash(dir string) (string, error) {
+	out, err := run(dir, "hash-object", "-t", "tree", "/dev/null")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func hasHead(dir string) bool {
