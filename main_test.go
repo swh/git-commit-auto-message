@@ -250,8 +250,10 @@ func TestStripCodeFences(t *testing.T) {
 		{"plain fence", "```\nfeat: x\n\nbody\n```", "feat: x\n\nbody"},
 		{"language tag", "```text\nfeat: x\n```", "feat: x"},
 		{"trailing whitespace around fence", "  ```\nfeat: x\n```  \n", "feat: x"},
-		{"unbalanced (no trailing fence) — leave intact", "```\nfeat: x\nbody", "```\nfeat: x\nbody"},
-		{"single line wrapped — too ambiguous, leave intact", "```feat: x```", "```feat: x```"},
+		{"preamble before fence", "Here's the commit message:\n\n```\nfeat: x\n\nbody\n```", "feat: x\n\nbody"},
+		{"markdown preamble before fence", "**Commit message:**\n```text\nfix: y\n```", "fix: y"},
+		{"trailing junk after fence is ignored", "```\nfeat: x\n```\n\n— hope this helps!", "feat: x"},
+		{"unbalanced (no closing fence) — leave intact", "```\nfeat: x\nbody", "```\nfeat: x\nbody"},
 		{"empty input", "", ""},
 		{"fences only", "```\n```", ""},
 	}

@@ -135,9 +135,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	raw := msg
 	msg = stripCodeFences(strings.TrimSpace(msg))
 	if msg == "" {
-		return errors.New("claude returned an empty message")
+		return fmt.Errorf("claude returned an empty message (raw output: %q)", raw)
 	}
 
 	if *printOnly {
@@ -407,24 +408,36 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 	return b.String()
 }
 
-// stripCodeFences removes a wrapping markdown code fence around s, if
-// present. The model is instructed not to use code fences but occasionally
-// does anyway; commit messages aren't markdown, so we strip them rather
-// than committing literal backticks.
+// stripCodeFences extracts the commit message from a fenced code block, if
+// the model emitted one. The system instruction forbids fences but the
+// model occasionally adds them anyway, sometimes with preamble like
+// "Here's the commit message:" above. We find the first opening fence and
+// the last closing fence and return the content between them. If fences
+// aren't balanced, we leave the input intact rather than mangle it.
 func stripCodeFences(s string) string {
 	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
 	lines := strings.Split(s, "\n")
-	if len(lines) < 2 {
+	openIdx := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
 		return s
 	}
-	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+	closeIdx := -1
+	for i := len(lines) - 1; i > openIdx; i-- {
+		if strings.TrimSpace(lines[i]) == "```" {
+			closeIdx = i
+			break
+		}
+	}
+	if closeIdx < 0 {
 		return s
 	}
-	// First line is "```" or "```lang"; drop it and the trailing fence.
-	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+	return strings.TrimSpace(strings.Join(lines[openIdx+1:closeIdx], "\n"))
 }
 
 func cleanHints(hints []string) []string {
