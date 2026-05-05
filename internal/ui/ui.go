@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/swh/git-commit-auto-message/internal/config"
 	"github.com/swh/git-commit-auto-message/internal/git"
@@ -45,10 +46,33 @@ var msgBox = lipgloss.NewStyle().
 	BorderForeground(lipgloss.Color("63")).
 	Padding(0, 1)
 
+// boxedMessage renders the suggestion inside the styled box, capping the
+// content width to fit the current terminal so long lines wrap inside the
+// border instead of bleeding past the right edge. Lipgloss adds 4 columns of
+// chrome (border + padding) on top of the content width; huh indents the
+// description a few more, so we leave extra slack.
+func boxedMessage(s string) string {
+	const chrome = 4 // border + padding columns
+	const huhIndent = 4
+	width := max(terminalWidth()-chrome-huhIndent, 20)
+	return msgBox.Width(width).Render(s)
+}
+
+// terminalWidth returns the current terminal width, or 80 if it can't be
+// determined (e.g. piped output or a non-TTY parent).
+func terminalWidth() int {
+	for _, fd := range []uintptr{os.Stderr.Fd(), os.Stdout.Fd()} {
+		if w, _, err := term.GetSize(fd); err == nil && w > 0 {
+			return w
+		}
+	}
+	return 80
+}
+
 // Confirm prints the suggestion and shows a select prompt. Default selection
 // is Cancel — Ctrl+C / Esc also cancels.
 func Confirm(suggested string) (string, Action, error) {
-	box := msgBox.Render(suggested)
+	box := boxedMessage(suggested)
 	var action Action
 	err := huh.NewSelect[Action]().
 		Title("Commit this message?").

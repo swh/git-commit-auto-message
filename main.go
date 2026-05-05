@@ -14,6 +14,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/pflag"
 
+	"github.com/swh/git-commit-auto-message/internal/bedrock"
 	"github.com/swh/git-commit-auto-message/internal/claudecli"
 	"github.com/swh/git-commit-auto-message/internal/config"
 	"github.com/swh/git-commit-auto-message/internal/git"
@@ -50,7 +51,7 @@ type cliFlags struct {
 
 func parseFlags() cliFlags {
 	var f cliFlags
-	pflag.StringVarP(&f.model, "model", "m", "", "override model id passed to `claude --model`")
+	pflag.StringVarP(&f.model, "model", "m", "", "override model id (claude CLI: passed to `claude --model`; bedrock: model invocation id)")
 	pflag.BoolVarP(&f.printOnly, "print", "p", false, "print the message and exit; do not prompt or commit")
 	pflag.BoolVarP(&f.noHistory, "no-history", "n", false, "skip Claude Code conversation history")
 	pflag.IntVar(&f.fallbackN, "fallback-messages", 20, "max recent messages to include when no per-file correlation matches")
@@ -79,6 +80,11 @@ func run() error {
 	}
 	if !flags.printOnly {
 		fmt.Fprintf(os.Stderr, "gcam: style=%s (%s)\n", resolved.Style, resolved.Source)
+		if bedrock.Available() {
+			fmt.Fprintf(os.Stderr, "gcam: backend=bedrock (model=%s)\n", bedrock.Model(flags.model))
+		} else {
+			fmt.Fprintln(os.Stderr, "gcam: backend=claude -p (fallback; set AWS_BEARER_TOKEN_BEDROCK to use Bedrock)")
+		}
 	}
 
 	files, m, err := selectFiles(cwd, flags.printOnly)
@@ -193,16 +199,26 @@ func gatherTranscript(root string, files []git.ChangedFile, flags cliFlags) ([]f
 	return buckets, nil
 }
 
-// suggestMessage shells out to `claude -p`, strips any code fences the model
-// added despite being told not to, and rejects empty output.
+// suggestMessage dispatches to the default Bedrock backend when
+// AWS_BEARER_TOKEN_BEDROCK is set, falling back to `claude -p` otherwise.
+// It strips any code fences the model added despite being told not to, and
+// rejects empty output.
 func suggestMessage(ctx context.Context, prompt, model string) (string, error) {
-	raw, err := claudecli.Suggest(ctx, prompt, model)
+	var (
+		raw string
+		err error
+	)
+	if bedrock.Available() {
+		raw, err = bedrock.Suggest(ctx, prompt, model)
+	} else {
+		raw, err = claudecli.Suggest(ctx, prompt, model)
+	}
 	if err != nil {
 		return "", err
 	}
 	msg := stripCodeFences(strings.TrimSpace(raw))
 	if msg == "" {
-		return "", fmt.Errorf("claude returned an empty message (raw output: %q)", raw)
+		return "", fmt.Errorf("model returned an empty message (raw output: %q)", raw)
 	}
 	return msg, nil
 }
@@ -394,6 +410,13 @@ func buildPrompt(cwd, diff string, buckets []fileBucket, fallback []history.Mess
 	cleaned := cleanHints(hints)
 
 	var b strings.Builder
+	// Sentinel so that next run's transcript-history reader can recognise and
+	// skip the `claude -p` session this prompt is about to create. Without
+	// this, gcam pulls its own prior prompts back in as "user intent" and the
+	// model gets confused or echoes fragments of those prompts as the
+	// suggested commit message.
+	b.WriteString(history.PromptSentinel)
+	b.WriteString("\n")
 	b.WriteString(systemInstruction(style))
 	if len(cleaned) > 0 {
 		b.WriteString(" When the user supplies hints (see below), you MUST reflect each hint in the commit message — usually in the body, or in the subject if the hint is the main reason for the change. Treat hints as overriding any conflicting signal from the diff or transcript.")

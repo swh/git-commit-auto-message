@@ -45,7 +45,11 @@ The flow is linear and lives in `main.go::run`:
    section showing the correlated messages. If no file matched any
    message it falls back to the last N messages globally — better than
    no context at all.
-5. `internal/claudecli` shells out to `claude -p` with the prompt on stdin.
+5. Backend dispatch: by default, `internal/bedrock` POSTs the prompt to the
+   Bedrock InvokeModel endpoint with bearer auth (`AWS_BEARER_TOKEN_BEDROCK`).
+   If that env var is absent, gcam falls back to `internal/claudecli` which
+   shells out to `claude -p`. Region picks up `AWS_REGION`/`AWS_DEFAULT_REGION`
+   (default `us-east-1`); model id picks up `GCAM_BEDROCK_MODEL` or `--model`.
 6. `internal/ui.Confirm` prints the suggestion in a styled box and shows a
    `huh` select (Accept / Edit / Cancel). On edit it writes to a temp file,
    runs `$GIT_EDITOR`/`$EDITOR`/`vi`, and reads back the result. On accept
@@ -55,11 +59,12 @@ The flow is linear and lives in `main.go::run`:
 Conventional Commits 1.0.0) before any of the above runs, and `buildPrompt`
 emits a different system instruction depending on the result.
 
-The Claude Code CLI is the only model backend right now. The original
-sketch had a `Provider` interface fronting Anthropic API / Bedrock too;
-that was dropped in favour of the simpler single-path design. If multiple
-backends are needed later, reintroduce the abstraction at the
-`claudecli.Suggest` boundary.
+Two backends are wired up: the default Bedrock direct-API path (active
+whenever `AWS_BEARER_TOKEN_BEDROCK` is set) and a `claude -p` fallback.
+Dispatch lives in `main.suggestMessage` — both packages expose a
+`Suggest(ctx, prompt, model) (string, error)` shape, so if a third backend
+is added, lift the selector into a small interface rather than growing the
+`if` ladder.
 
 ## Commit-message style configuration
 

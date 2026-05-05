@@ -28,6 +28,16 @@ type Message struct {
 	Text string
 }
 
+// PromptSentinel marks a transcript message as a gcam-generated prompt so we
+// can recognise and skip it on subsequent runs. Without this, every `claude
+// -p` invocation gets logged into the project's session directory and gets
+// fed back as "user intent" on the next run — the model then echoes
+// fragments of its own prior prompt back as the suggested commit message.
+//
+// gcam prepends this sentinel to every prompt; readSession drops any session
+// whose first user message begins with it.
+const PromptSentinel = "<!-- gcam:auto-prompt -->"
+
 // Recent returns user/assistant messages from session transcripts of the
 // project rooted at projectRoot, timestamped at or after `since`. If `since`
 // is zero, all messages are returned. The slice is sorted by time. Returns
@@ -96,6 +106,7 @@ func readSession(path string) ([]Message, error) {
 	var out []Message
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	sawFirstUser := false
 	for scanner.Scan() {
 		var e entry
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
@@ -119,6 +130,12 @@ func readSession(path string) ([]Message, error) {
 		role := m.Role
 		if role == "" {
 			role = e.Type
+		}
+		if !sawFirstUser && role == "user" {
+			sawFirstUser = true
+			if strings.HasPrefix(strings.TrimSpace(text), PromptSentinel) {
+				return nil, nil
+			}
 		}
 		out = append(out, Message{Time: ts, Role: role, Text: text})
 	}
