@@ -49,12 +49,10 @@ var msgBox = lipgloss.NewStyle().
 // boxedMessage renders the suggestion inside the styled box, capping the
 // content width to fit the current terminal so long lines wrap inside the
 // border instead of bleeding past the right edge. Lipgloss adds 4 columns of
-// chrome (border + padding) on top of the content width; huh indents the
-// description a few more, so we leave extra slack.
+// chrome (border + padding) on top of the content width.
 func boxedMessage(s string) string {
 	const chrome = 4 // border + padding columns
-	const huhIndent = 4
-	width := max(terminalWidth()-chrome-huhIndent, 20)
+	width := max(terminalWidth()-chrome, 20)
 	return msgBox.Width(width).Render(s)
 }
 
@@ -71,12 +69,17 @@ func terminalWidth() int {
 
 // Confirm prints the suggestion and shows a select prompt. Default selection
 // is Cancel — Ctrl+C / Esc also cancels.
+//
+// The boxed message is printed to stderr as ordinary scrollback *above* the
+// prompt rather than as the select's Description: huh renders inline and never
+// scrolls, so a message taller than the terminal would otherwise push the
+// options off-screen. Printing it first keeps the (short) menu always visible
+// and lets the user scroll up to read a long message.
 func Confirm(suggested string) (string, Action, error) {
-	box := boxedMessage(suggested)
+	fmt.Fprintln(os.Stderr, boxedMessage(suggested))
 	var action Action
 	err := huh.NewSelect[Action]().
 		Title("Commit this message?").
-		Description(box).
 		Options(
 			huh.NewOption("Cancel", Cancel),
 			huh.NewOption("Accept and commit", Accept),
