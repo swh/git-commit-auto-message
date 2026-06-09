@@ -286,16 +286,24 @@ func announceMode(cwd string, files []git.ChangedFile, m mode) {
 
 func commit(cwd string, files []git.ChangedFile, m mode, msg string) error {
 	if m == modeAll {
+		// Only add files with unstaged changes. Files already fully staged
+		// (e.g. a staged deletion, status "D ") need no re-adding, and
+		// `git add` of such a path matches nothing in the working tree or
+		// index and fails with exit 128.
 		args := []string{"add", "--"}
 		for _, f := range files {
-			args = append(args, f.Path)
+			if f.HasUnstaged() {
+				args = append(args, f.Path)
+			}
 		}
-		add := exec.Command("git", args...)
-		add.Dir = cwd
-		add.Stdout = os.Stdout
-		add.Stderr = os.Stderr
-		if err := add.Run(); err != nil {
-			return fmt.Errorf("git add: %w", err)
+		if len(args) > 2 {
+			add := exec.Command("git", args...)
+			add.Dir = cwd
+			add.Stdout = os.Stdout
+			add.Stderr = os.Stderr
+			if err := add.Run(); err != nil {
+				return fmt.Errorf("git add: %w", err)
+			}
 		}
 	}
 
